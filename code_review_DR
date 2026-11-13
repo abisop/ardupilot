@@ -2,6 +2,38 @@ struct drag_elements : EKF_obs_element_t {
     Vector2f accelXY;       // measured specific force along the X and Y body axes (m/sec**2)
 };
 
+/*
+  template class for more convenient type handling
+ */
+template <typename element_type>
+class EKF_obs_buffer_t : ekf_ring_buffer
+{
+    static_assert(
+        std::is_base_of<EKF_obs_element_t, element_type>::value,
+        "must be a descendant of EKF_obs_element_t"
+    );
+public:
+    EKF_obs_buffer_t() :
+        ekf_ring_buffer(sizeof(element_type))
+        {}
+
+    bool init(uint8_t _size) {
+        return ekf_ring_buffer::init(_size);
+    }
+
+    bool recall(element_type &element,uint32_t sample_time) {
+        return ekf_ring_buffer::recall(&element, sample_time);
+    }
+
+    void push(const element_type &element) {
+        return ekf_ring_buffer::push(&element);
+    }
+
+    void reset() {
+        return ekf_ring_buffer::reset();
+    }
+};
+
 #if EK3_FEATURE_DRAG_FUSION
     // drag fusion for multicopter wind estimation
     EKF_obs_buffer_t<drag_elements> storedDrag;

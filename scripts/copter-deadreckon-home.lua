@@ -1,67 +1,11 @@
 -- Copter attempts to fly home using dead reckoning if the GPS quality deteriorates or an EKF failsafe triggers
---
--- CAUTION: This script only works for Copter 4.3 (and higher)
--- this script checks for low GPS quality and/or an EKF failsafe and if either occurs, flies in the last known direction towards home
---
--- DR_ENABLE : 1 = enabled, 0 = disabled
--- DR_ENABLE_DIST : distance from home (in meters) beyond which the dead reckoning will be enabled
--- DR_GPS_SACC_MAX : GPS speed accuracy maximum, above which deadreckoning home will begin (default is 0.8).  Lower values trigger with good GPS quality, higher values will allow poorer GPS before triggering. Set to 0 to disable use of GPS speed accuracy.
--- DR_GPS_SAT_MIN : GPS satellite count threshold below which deadreckoning home will begin (default is 6).  Higher values trigger with good GPS quality, Lower values trigger with worse GPS quality. Set to 0 to disable use of GPS satellite count.
--- DR_GPS_TRIGG_SEC : GPS checks must fail for this many seconds before dead reckoning will be triggered.
--- DR_FLY_ANGLE : lean angle (in degrees) during deadreckoning.  Most vehicles reach maximum speed at 22deg
--- DR_FLY_ALT_MIN : min alt (above home in meters) during deadreckoning. zero to return at current alt
--- DR_FLY_TIMEOUT : timeout (in seconds).  Vehicle will attempt to switch to NEXT_MODE after this many seconds of deadreckoning.  If it cannot switch modes it will continue in Guided_NoGPS.  Set to 0 to disable timeout
--- DR_NEXT_MODE : flight mode vehicle will change to when GPS / EKF recovers or DR_FLY_TIMEOUT expires.  Default is 6=RTL, see FLTMODE1 parameter description for list of flight mode number.  Set to -1 to return to mode used before deadreckoning was triggered
-
--- How to use:
---   1. set SCR_ENABLE = 1 to enable scripting (and reboot the autopilot)
---   2. set SCR_HEAP_SIZE to 80000 or higher to allocate enough memory for this script
---   3. set DR_ENABLE = 1 to enable dead reckoning
---   4. optionally set DR_GPS_SACC_MAX and/or DR_GPS_SAT_MIN parameters to adjust how bad the GPS quality must be before triggering
---   5. confirm "DR: waiting for dist (Xm < 50m)" message is displayed on ground station (so you know script is working)
---   6. arm and takeoff to a safe altitude
---   7. fly at least DR_ENABLE_DIST meters from home and confirm "DR: activated!" is displayed on ground station
---
---   If this script senses low GPS quality or an EKF failsafe triggers:
---       - vehicle will change to Guided_NoGPS mode
---       - vehicle will lean in the last known direction of home (see DR_FLY_ANGLE)
---       - if GPS recovers or EKF failsafe is cleared the vehicle will switch to DR_NEXT_MODE (if -1 then it will switch back to the mode in use before the GPS/EKF failure)
---       - if the timeout is surpassed (see DR_FLY_TIMEOUT) the vehicle will try to switch to DR_NEXT_MODE.  If it fails to change it will continue in Guided_NoGPS but keep trying to change mode
---       - the pilot can retake control by switching to an "unprotected" mode like AltHold, Loiter (see "protected_mode_array" below)
---
--- Testing in SITL:
---   a. set map setshowsimpos 1 (to allow seeing where vehicle really is in simulator even with GPS disabled)
---   b. set SIM_GPS1_ENABLE = 0 to disable GPS (confirm dead reckoning begins)
---   c. set SIM_GPS1_ENABLE = 1 to re-enable GPS
---   d. set SIM_GPS_NUMSAT = 3 to lower simulated satellite count to confirm script triggers
---   e. set DR_GPS_SACC_MAX = 0.01 to lower the threshold and trigger below the simulator value which is 0.04 (remember to set this back after testing!)
---
--- Test on a real vehicle:
---   A. set DR_FLY_TIMEOUT to a low value (e.g. 5 seconds)
---   B. fly the vehicle at least DR_DIST_MIN meters from home and confirm the "DR: activated!" message is displayed
---   C. set GPS1_TYPE = 0 to disable GPS and confirm the vehicle begins deadreckoning after a few seconds
---   D. restore GPS1_TYPE to its original value (normally 1) and confirm the vehicle switches to DR_NEXT_MODE
---   E. restore DR_FLY_TIMEOUT to a higher value for real-world use
--- Note: Instaed of setting GPS1_TYPE, an auxiliary function switch can be setup to disable the GPS (e.g. RC9_OPTION = 65/"Disable GPS")
---
--- Testing that it does not require RC (in SITL):
---   a. set FS_OPTIONS's "Continue if in Guided on RC failsafe" bit
---   b. set FS_GCS_ENABLE = 1 (to enable GCS failsafe otherwise RC failsafe will trigger anyway)
---   c. optionally set MAV_GCS_SYSID = 77 (or almost any other unused system id) to trick the above check so that GCS failsafe can really be disabled
---   d. set SIM_RC_FAIL = 1 (to simulate RC failure, note vehicle keeps flying)
---   e. set SIM_RC_FAIL = 0 (to simulate RC recovery)
---
--- Test with wind (in SITL)
---   a. SIM_WIND_DIR <-- sets direction wind is coming from
---   b. SIM_WIND_SPD <-- sets wind speed in m/s
---
 
 ---@diagnostic disable: param-type-mismatch
 ---@diagnostic disable: cast-local-type
 
 -- create and initialise parameters
-local PARAM_TABLE_KEY = 86  -- parameter table key must be used by only one script on a particular flight controller
-assert(param:add_table(PARAM_TABLE_KEY, "DR_", 9), 'could not add param table')
+local PARAM_TABLE_KEY = 95  -- parameter table key must be used by only one script on a particular flight controller
+assert(param:add_table(PARAM_TABLE_KEY, "DR_", 14), 'could not add param table')
 assert(param:add_param(PARAM_TABLE_KEY, 1, 'ENABLE', 1), 'could not add DR_ENABLE param')   -- 1 = enabled, 0 = disabled
 assert(param:add_param(PARAM_TABLE_KEY, 2, 'ENABLE_DIST', 50), 'could not add DR_ENABLE_DIST param')   -- distance from home (in meters) beyond which the dead reckoning will be enabled
 assert(param:add_param(PARAM_TABLE_KEY, 3, 'GPS_SACC_MAX', 0.8), 'could not add DR_GPS_SACC_MAX param') -- GPS speed accuracy max threshold
@@ -72,6 +16,17 @@ assert(param:add_param(PARAM_TABLE_KEY, 6, 'FLY_ANGLE', 10), 'could not add DR_F
 assert(param:add_param(PARAM_TABLE_KEY, 7, 'FLY_ALT_MIN', 0), 'could not add DR_FLY_ALT_MIN param') -- min alt above home (in meters) during deadreckoning. zero to return at current alt
 assert(param:add_param(PARAM_TABLE_KEY, 8, 'FLY_TIMEOUT', 30), 'could not add DR_FLY_TIMEOUT param')-- deadreckoning timeout (in seconds)
 assert(param:add_param(PARAM_TABLE_KEY, 9, 'NEXT_MODE', 6), 'could not add DR_NEXT_MODE param')     -- mode to switch to after GPS recovers or timeout elapses
+assert(param:add_param(PARAM_TABLE_KEY, 10, 'DYNPOS_ENABLE', 0), 'could not add DR_DYNAMIC_POSITION_UPDATE_ENABLE param') -- enable dynamic position update
+assert(param:add_param(PARAM_TABLE_KEY, 11, 'LEVELTIME', 1000), 'could not add DR_DYNAMIC_POSITION_UPDATE_ENABLE param') -- enable dynamic position update
+assert(param:add_param(PARAM_TABLE_KEY, 12, 'TEST_OCT16', 0), 'could not add DR_TEST_OCT16 param') -- temporary test parameter
+local test = Parameter("DR_TEST_OCT16") -- temporary test parameter 
+assert(param:add_param(PARAM_TABLE_KEY, 13, 'ROLLTIME', 1000), 'could not add DR_ROLLTIME param') -- roll time in milliseconds
+assert(param:add_param(PARAM_TABLE_KEY, 14, 'ROLLANGLE', 10), 'could not add DR_ROLLANGLE param') -- roll angle in degrees
+
+local roll_angle = Parameter("DR_ROLLANGLE") -- roll angle in degrees
+local roll_time = Parameter("DR_ROLLTIME") -- roll time in milliseconds
+
+-- ROLL -> level -> deadreckon home
 
 -- bind parameters to variables
 --[[
@@ -149,15 +104,29 @@ local fly_alt_min = Parameter("DR_FLY_ALT_MIN")        -- min alt above home (in
 local fly_timeoout = Parameter("DR_FLY_TIMEOUT")       -- deadreckoning timeout (in seconds)
 
 --[[
+  // @Param: DR_DYNAMIC_POSITION_UPDATE_ENABLE
+  // @DisplayName: Deadreckoning Dynamic Position Update Enable
+  // @Description: Enable dynamic position update during deadreckoning
+  // @Values: 0:Disabled,1:Enabled
+  // @User: Standard
+--]]
+local dynpos_enable = Parameter("DR_DYNPOS_ENABLE") -- enable dynamic position update
+local levelTime = Parameter("DR_LEVELTIME") -- level time in milliseconds
+local rollTime = Parameter("DR_ROLLTIME") -- roll time in milliseconds
+local rollAngle = Parameter("DR_ROLLANGLE") -- roll angle in degrees
+
+--[[
   // @Param: DR_NEXT_MODE
   // @DisplayName: Deadreckoning Next Mode
   // @Description: Copter switch to this mode after GPS recovers or DR_FLY_TIMEOUT has elapsed.  Default is 6/RTL.  Set to -1 to return to mode used before deadreckoning was triggered
   // @Values: 2:AltHold,3:Auto,4:Guided,5:Loiter,6:RTL,7:Circle,9:Land,16:PosHold,17:Brake,20:Guided_NoGPS,21:Smart_RTL,27:Auto RTL
   // @User: Standard
 --]]
+
 local next_mode = Parameter("DR_NEXT_MODE")            -- mode to switch to after GPS recovers or timeout elapses
 local wp_speed_up = Parameter("WP_SPD_UP")             -- maximum climb rate in m/s from WP_SPD_UP
 local wp_accel_z = Parameter("WP_ACC_Z")               -- maximum vertical acceleration in m/s from WP_ACC_Z
+
 
 -- modes deadreckoning may be activated from
 -- comment out lines below to remove protection from these modes
@@ -186,7 +155,39 @@ end
 
 local copter_guided_nogps_mode = 20 -- Guided_NoGPS is mode 20 on Copter
 local copter_RTL_mode = 6           -- RTL is mode 6 on Copter
-local recovery_delay_ms = 3000      -- switch to NEXT_MODE happens this many milliseconds after GPS and EKF failsafe recover
+
+-- Copter mode numbers used when announcing a mode change
+local mode_names = {
+  [0] = "STABILIZE",
+  [1] = "ACRO",
+  [2] = "ALT_HOLD",
+  [3] = "AUTO",
+  [4] = "GUIDED",
+  [5] = "LOITER",
+  [6] = "RTL",
+  [7] = "CIRCLE",
+  [9] = "LAND",
+  [11] = "DRIFT",
+  [13] = "SPORT",
+  [16] = "POSHOLD",
+  [17] = "BRAKE",
+  [20] = "GUIDED_NOGPS",
+  [21] = "SMART_RTL",
+  [27] = "AUTO_RTL",
+}
+local last_mode = nil
+
+-- flight stage names used when announcing a stage change
+-- 0 wait for good GPS and distance from home, 1 wait for bad GPS or EKF,
+-- 2 level vehicle, 3 dead reckon home
+local stage_names = {
+  [0] = "WAIT_GPS_DIST",
+  [1] = "WAIT_GPS_EKF_FAIL",
+  [2] = "LEVEL_VEHICLE",
+  [3] = "DEADRECKON_HOME",
+}
+local last_flight_stage = nil
+local recovery_delay_ms = 2000      -- switch to NEXT_MODE happens this many milliseconds after GPS and EKF failsafe recover
 
 local gps_bad = false               -- true if GPS is failing checks
 local ekf_bad = false               -- true if EKF failsafe has triggered
@@ -208,12 +209,60 @@ local stage3_start_time_ms  -- system time stage3 started (deadreckon home)
 local last_print_ms = 0     -- pilot update timer
 local interval_ms = 100     -- update at 10hz
 
+
+-- wind related globals
+local curr_loc = nil
+local home = nil
+
+local last_vehicle_vel = 0
+local last_wind_vel = 0
+
+local wind_direction = 0
+local start_ms = millis()
+local displaced = {0, 0}
+function wind_compensation(home_direction)
+  local now_ms = millis()
+  local dt = (now_ms - start_ms) * 0.001  -- seconds
+
+  -- wind_estimate() - Returns a Vector3f containing the current wind estimate for the vehicle
+  local wind = ahrs:wind_estimate()
+  local wind_speed = math.sqrt(wind:x()^2 + wind:y()^2)
+  wind_direction = math.deg(math.atan(wind:y(), wind:x())) + 360
+
+  if(gps_or_ekf_bad) then
+    -- print calculating displacemant since last update
+    gcs:send_text(6, "DR: calculating displacement since last update")
+    displaced = {displaced[1] + wind_speed * math.cos(wind_direction - home_direction) * dt, displaced[2] + wind_speed * math.sin(wind_direction - home_direction) * dt}
+  else
+    displaced[0] = 0
+    displaced[1] = 0
+  end
+  return displaced
+end
+
 function update()
+
 
   -- exit immediately if not enabled
   if (enable:get() < 1) then
     return update, 1000
   end
+
+  -- announce flight mode whenever it changes
+  local curr_mode = vehicle:get_mode()
+  if curr_mode ~= last_mode then
+    local mode_name = mode_names[curr_mode] or tostring(curr_mode)
+    gcs:send_text(6, "DR: flight mode " .. mode_name)
+    last_mode = curr_mode
+  end
+
+  -- announce flight stage whenever it changes
+  if flight_stage ~= last_flight_stage then
+    local stage_name = stage_names[flight_stage] or tostring(flight_stage)
+    gcs:send_text(6, "DR: flight stage " .. tostring(flight_stage) .. " " .. stage_name)
+    last_flight_stage = flight_stage
+  end
+
 
   -- determine if progress update should be sent to user
   local now_ms = millis()
@@ -222,6 +271,11 @@ function update()
     last_print_ms = now_ms
     update_user = true
   end
+
+  -- local displaced = wind_compensation(wind, home_yaw)
+  -- if(update_user) then
+  --   gcs:send_text(5, "displaced: HOME_DIR:" .. tostring(displaced[0]) .. " WIND_DIR:" .. tostring(displaced[1]) )
+  -- end  
 
   -- check GPS
   local gps_speed_acc = gps:speed_accuracy(gps:primary_sensor())
@@ -275,16 +329,27 @@ function update()
 
   -- update distance and direction home while GPS and EKF are good
   if (not gps_or_ekf_bad) then
-    local home = ahrs:get_home()
-    local curr_loc = ahrs:get_location()
+    home = ahrs:get_home()
+    -- local curr_loc = gps:location(gps:primary_sensor()) 
+    curr_loc = ahrs:get_location()
     if home and curr_loc then
       home_dist = curr_loc:get_distance(home)
       home_yaw = math.deg(curr_loc:get_bearing(home))
+      -- local vel = ahrs:get_velocity_NED()
+      -- local vn = vel:x()
+      -- local ve = vel:y()
+      -- last_vehicle_vel = math.sqrt(vn * vn + ve * ve)
+      -- local wind_estimate = ahrs:wind_estimate()
+      -- last_wind_vel = math.sqrt(wind_estimate:x()^2 + wind_estimate:y()^2)
     elseif (update_user) then
       -- warn user of unexpected failure
       gcs:send_text(0, "DR: could not get home or vehicle location")
     end
   end
+
+
+
+
 
   -- reset flight_stage when disarmed
   if not arming:is_armed() then 
@@ -314,6 +379,8 @@ function update()
   -- flight_stage 1: wait for bad gps or ekf
   if (flight_stage == 1) then
     if (gps_or_ekf_bad and is_protected_mode()) then
+      --send last vehicle velocity and wind velocity
+      gcs:send_text(5, "DR: last vehicle velocity:" .. tostring(last_vehicle_vel) .. " last wind velocity:" .. tostring(last_wind_vel))
       -- change to Guided_NoGPS and initialise stage2
       if (vehicle:set_mode(copter_guided_nogps_mode)) then
         flight_stage = 2
@@ -332,7 +399,11 @@ function update()
     return update, interval_ms
   end
 
-  -- flight_stage 2: level vehicle for 5 seconds
+
+
+
+
+  -- flight_stage 2:     -- level vehicle for time given by the user in parameter DR_LEVELTIME
   if (flight_stage == 2) then
     -- allow pilot to retake control
     if (vehicle:get_mode() ~= copter_guided_nogps_mode) then
@@ -341,10 +412,23 @@ function update()
       return update, interval_ms
     end
 
-    -- level vehicle for 5 seconds
+    -- level vehicle for time given by the user in parameter DR_LEVELTIME
     climb_rate = 0
-    vehicle:set_target_angle_and_climbrate(0, 0, target_yaw, climb_rate, false, 0)
-    if ((now_ms - stage2_start_time_ms) >= 5000) then
+
+    if(test:get() > 0) then
+      if ((now_ms - stage2_start_time_ms) <= rollTime:get()) then
+        gcs:send_text(5, "DR: stopping")
+        vehicle:set_target_angle_and_climbrate(20, 0, target_yaw, climb_rate, false, 0)
+      end    
+      if ((now_ms - stage2_start_time_ms) >= rollTime:get() + levelTime:get() - 500) then
+        gcs:send_text(5, "DR: rolling")
+        vehicle:set_target_angle_and_climbrate(0, roll_angle:get(), target_yaw, climb_rate, false, 0)
+      end
+    else
+      vehicle:set_target_angle_and_climbrate(0, 0, target_yaw, climb_rate, false, 0)
+    end
+
+    if ((now_ms - stage2_start_time_ms) >= levelTime:get()) then
       flight_stage = 3
       stage3_start_time_ms = now_ms
       gcs:send_text(5, "DR: flying home")
@@ -354,6 +438,8 @@ function update()
     end
     return update, interval_ms
   end
+
+
 
   -- flight_stage 3: deadreckon towards home
   if (flight_stage == 3) then
@@ -379,6 +465,13 @@ function update()
           local climb_rate_chg_max = interval_ms * 0.001 * wp_accel_z:get()
           climb_rate = math.min(target_alt_above_vehicle * 0.1, wp_speed_up:get(), climb_rate + climb_rate_chg_max)
         end
+      end
+    end
+    
+    if (dynpos_enable:get() > 0) then
+      curr_loc = ahrs:get_location()
+      if curr_loc and home then
+        home_yaw = math.deg(curr_loc:get_bearing(home))
       end
     end
 
@@ -420,5 +513,32 @@ function update()
   return update, interval_ms
 end
 
+if(enable:get() > 0) then
+  gcs:send_text(5, "LOADED Return Towards Home Script")
+end
+
 return update()
 
+----------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- TO DO:
+
+
+--                      ** calculate distance to home left based on battery level and current consumption rate **
+-- Battery (battery:)¶
+-- The battery library provides access to information about the currently connected batteries on the vehicle.
+--     num_instances() - Returns the number of battery instances currently available.
+--     healthy( instance ) - Returns true if the requested battery instance is healthy. Healthy is considered to be ArduPilot is currently able to monitor the battery.
+--     voltage( instance ) - Returns the voltage of the selected battery instance.
+--     voltage_resting( instance ) - Returns the estimated battery voltage if it was not under load.
+--     current_amps( instance ) - Returns the current (in Amps) that is currently being consumed by the battery, or nil if current monitoring is not available.
+--     consumed_mah( instance ) - Returns the capacity (in milliamp hours) used from the battery, or nil if current monitoring is not available.
+--     consumed_wh( instance ) - Returns the used watt hours from the battery, or nil if energy monitoring is not available.
+--     capacity_remaining_pct( instance ) - Returns the remaining percentage of battery (from 0 to 100)
+--     pack_capacity_mah( instance ) - Returns the full pack capacity (in milliamp hours) from the battery.
+--     has_failsafed() - Returns true if any of the batteries being monitored have triggered a failsafe.
+--     overpower_detected( instance ) - Returns true if too much power is being drawn from the battery being monitored.
+--     get_temperature( instance ) - Returns the temperature of the battery in degrees Celsius if the battery supports temperature monitoring.
+--     get_cycle_count( instance ) - Returns cycle count of the battery or nil if not available.
+
+--                      ** Wind based pitch and direction compensation **

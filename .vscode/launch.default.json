@@ -17,6 +17,13 @@
             ]
         },
         {
+            "name": "ArduPilot",
+            "compileCommands": "${workspaceFolder}/build/sitl/compile_commands.json",
+            "compilerPath": "/usr/bin/g++",
+            "cppStandard": "gnu++17",
+            "cStandard": "gnu11"
+        },
+        {
             "name": "AP_SITL",
             "type": "cppdbg",
             "request": "launch",

@@ -660,6 +660,7 @@ void NavEKF3_core::readGpsData()
         const bool canDoWindRelNav = assume_zero_sideslip();
         const bool canDeadReckon = ((doingFlowNav && gndOffsetValid) || canDoWindRelNav || doingBodyVelNav);
         if (canDeadReckon) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO,"can dead reckon: %d %d %d %d",doingBodyVelNav,doingFlowNav,canDoWindRelNav,canDeadReckon);
             // If we can do dead reckoning with a data source other than GPS there is time to wait
             // for GPS alignment checks to pass before using GPS inside the EKF.
             // this gets set back to false in calcGpsGoodToAlign() when GPS checks pass
@@ -670,6 +671,7 @@ void NavEKF3_core::readGpsData()
             lastGpsVelPass_ms = 0;
             gpsGoodToAlign = false;
         } else {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO,"cannot dead reckon, using GPS");
             waitingForGpsChecks = false;
         }
     }
